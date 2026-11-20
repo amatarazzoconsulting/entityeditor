@@ -1,8 +1,8 @@
 # Entity Editor
 
-Entity Editor is a header-only C++20 library in [`document_parser.hpp`](document_parser.hpp). It provides a shared node model, CSV parsing and editing, basic selector and node operations, date/time conversion, and value formatting.
+Entity Editor is a dependency-free, header-only C++20 library in [`document_parser.hpp`](document_parser.hpp). It parses and edits HTML, strict XML/XHTML, JSON, a documented YAML subset, CSS rules/declarations, and CSV data, then serializes the edited tree back to text or a file.
 
-> **Scope note:** the current HTML, XML, XSL, JSON, and YAML entry points store their input as raw text; they do not parse those formats into nodes. CSV is the only implemented structured parser. The API also contains simplified selector and HTML-fragment operations. The examples and reference below describe what this version actually does.
+The parsers validate structure and report failures through `false` and `DocumentEditor::lastError()`; failed parses leave the last successfully parsed document intact. Serialization is normalized rather than source-format preserving (for example, whitespace and attribute order may change). This self-contained implementation is not a complete browser HTML5 tree builder or complete YAML/CSS semantic validator; supported syntax and limitations are called out below.
 
 ## Requirements and quick start
 
@@ -101,24 +101,80 @@ int main() {
 }
 ```
 
-This produces an HTML-like fragment. `setInnerHTML` does **not** parse markup: it removes existing child nodes and stores the supplied string in a text node. `getInnerHTML`/`getOuterHTML` serialize node contents; they are not a full HTML parser or standards-compliant serializer.
+This produces an HTML fragment. `setInnerHTML` parses forgiving HTML markup and replaces the node's children. `getInnerHTML`/`getOuterHTML` serialize node contents; source whitespace, attribute order, and original quote style are not preserved.
 
-### 3. Preserve or write raw document text
+### 3. Edit an HTML or XHTML file and save it
 
-The HTML, XML, XSL, JSON, and YAML methods currently keep the supplied text unchanged. They can be used as simple text containers / file pass-throughs:
+HTML is parsed with forgiving tag recovery; XHTML is parsed strictly as XML. Load by extension, edit a node, then save:
 
 ```cpp
-DocumentEditor editor;
-if (!editor.parseJSON(R"({"enabled":true,"count":3})")) {
+#include "document_parser.hpp"
+
+#include <iostream>
+
+int main() {
+    DocumentEditor editor;
+    if (!editor.loadFile("page.xhtml")) {
+        std::cerr << editor.lastError() << '\n';
+        return 1;
+    }
+
+    if (!editor.setTextById("summary", "Updated content")) {
+        std::cerr << "Element #summary was not found\n";
+        return 1;
+    }
+    if (!editor.saveFile("page.xhtml")) {
+        std::cerr << editor.lastError() << '\n';
+        return 1;
+    }
+}
+```
+
+`loadFile` recognizes `.html`, `.htm`, `.xhtml`, `.xml`, `.xsl`, `.xslt`, `.json`, `.yaml`, `.yml`, `.css`, and `.csv` (case-insensitive). The extension determines the parser; file contents are not used to guess the format. `saveFile` writes the current document format to the requested path.
+
+### 4. Parse and edit CSS
+
+CSS rules and declarations are nodes too, so declarations can be located and changed before saving:
+
+```cpp
+DocumentEditor stylesheet;
+if (!stylesheet.loadFile("site.css")) {
     return 1;
 }
 
-const std::string originalText = editor.toString();
+for (const auto& color : stylesheet.findByTagName("color")) {
+    color->setText("#234567");
+}
+if (!stylesheet.saveFile("site.css")) {
+    return 1;
+}
 ```
 
-These methods do not validate or expose JSON keys, HTML elements, XML attributes, or YAML mappings. `DocumentEditor::loadFile` chooses an entry point from the extension (`html`, `htm`, `xml`, `xsl`, `xslt`, `json`, `yaml`, `yml`, or `csv`); it does not inspect the file contents to detect a format.
+The CSS parser recognizes comments, standard rule blocks, declarations, nested at-rules, strings, parentheses, and custom-property brace values. It checks syntax structure but does not validate property names or values against the CSS specification.
 
-### 4. Format numbers, units, and elapsed time
+### 5. Edit JSON or YAML data
+
+Object keys and mapping keys become node names. Find a key, change its scalar text, and serialize or save the edited document:
+
+```cpp
+DocumentEditor settings;
+if (!settings.loadFile("settings.json")) {
+    return 1;
+}
+
+auto retries = settings.findByTagName("retries");
+if (retries.empty()) {
+    return 1;
+}
+retries.front()->setText("5");
+if (!settings.saveFile("settings.json")) {
+    return 1;
+}
+```
+
+The same workflow works with supported YAML mappings and sequences. JSON preserves scalar kinds: use `setText` with a valid JSON number when editing a numeric node, or replace its `kind` with `"string"` via `setAttribute` when changing it to text.
+
+### 6. Format numbers, units, and elapsed time
 
 `ValueFormatter` offers locale-independent formatting helpers:
 
@@ -143,12 +199,12 @@ Pass this struct to `CSVParser::parse`, `CSVParser::serialize`, `DocumentEditor:
 | `escape` | `'"'` | Escape character used by the parser and emitted before quotes in serialized fields. |
 | `hasHeader` | `true` | Treats the first non-skipped line as headers during parsing. Serialization writes headers whenever the result/editor has them. |
 | `detectTypes` | `true` | Uses `TypedValue::detect` for fields. When false, parsed fields are strings. |
-| `trimFields` | `true` | Trims spaces and tabs around parsed data fields. Header strings are not trimmed by this option. |
-| `skipEmptyLines` | `true` | Skips physical lines that are exactly empty (after removing a trailing `\r`). |
-| `lineEnding` | `"\n"` | Line ending emitted by CSV serialization. Parsing uses `std::getline` and does not consult this option. |
-| `encoding` | `"UTF-8"` | Reserved option; encoding conversion is not currently implemented. |
+| `trimFields` | `true` | Trims spaces and tabs around parsed fields, including headers. |
+| `skipEmptyLines` | `true` | Skips physical records containing no characters; empty lines inside quoted fields are retained. |
+| `lineEnding` | `"\n"` | Line ending emitted by CSV serialization; parsing recognizes LF, CRLF, and CR record separators. |
+| `encoding` | `"UTF-8"` | Descriptive only; no encoding conversion is performed. Supply UTF-8 input. |
 
-CSV input is processed one physical line at a time. Quoted fields spanning multiple lines are not supported. The parser's quote/escape handling is simplified; test input containing quoted fields with your chosen options before relying on round-trip fidelity. `CSVParser::CSVParseResult` includes `document`, `headers`, typed `data`, `rawData`, `rowCount`, `columnCount`, `success`, and `error`; the current parser sets `success` on completion and does not populate detailed parse errors.
+Quoted fields can contain delimiters and line breaks. With the default `escape == quote`, doubled quotes represent a quote inside a quoted field; a distinct `escape` character can be used to escape the next character. Malformed quotes return `success == false` and populate `error`. `CSVParser::CSVParseResult` includes `document`, `headers`, typed `data`, `rawData`, `rowCount`, `columnCount`, `success`, and `error`. Delimiter must differ from quote and escape; these characters cannot be line breaks.
 
 ### `ValueFormatter` options
 
@@ -186,6 +242,7 @@ The parser returns a `DateTimeResult` with `valid`, `value`, `date`, `time`, `is
 
 - `parse(csv)` and `parse(csv, options)` return `CSVParseResult`.
 - `serialize(result)` and `serialize(result, options)` return CSV text.
+- `validateOptions(options)` throws `std::invalid_argument` for conflicting delimiter/quote/escape characters or line-break characters.
 - `ParseOptions` and the result fields are documented above. Serialization uses typed `data` and `headers`; `rawData` is not used.
 
 ### `DateTimeParser`
@@ -202,14 +259,17 @@ Public static methods are `number`, `currency`, `measurement`, `byteSize`, `date
 
 | Method | Description |
 | --- | --- |
-| `loadFile(filename)` | Loads text and dispatches by the listed filename extension; returns `false` on open failure or unknown extension. |
+| `loadFile(filename)` | Loads a file and dispatches by extension: `html`, `htm`, `xhtml`, `xml`, `xsl`, `xslt`, `json`, `yaml`, `yml`, `css`, or `csv`. |
 | `parseCSV(csv, options = {})` | Parses CSV and stores its typed rows, headers, document nodes, and active format. |
-| `parseHTML(html)`, `parseXML(xml)`, `parseXSL(xsl)`, `parseJSON(json)`, `parseYAML(yaml)` | Store the input text as-is and set the active output format. These are not structured parsers. |
+| `parseHTML(html)`, `parseXHTML(xhtml)`, `parseXML(xml)`, `parseXSL(xsl)` | Parse HTML forgivingly or parse XML/XHTML/XSL as well-formed XML. XSL uses the XML parser and serializer. |
+| `parseJSON(json)`, `parseYAML(yaml)`, `parseCSS(css)` | Parse structured JSON, the YAML subset, or CSS rules/declarations. |
+| `root()` | Return the current mutable root node, or `nullptr` before a successful parse. |
+| `lastError()` | Return the most recent file or parse error; successful parse/save clears it. |
 | `getCSVData()`, `getCSVHeaders()` | Return const references to the stored CSV rows and headers. |
 | `getCell(row, column)` | Return an optional typed cell. |
 | `setCell(row, column, string)` | Update a cell in an existing row; returns false for an invalid row. |
 | `addCSVRow(row)` | Append typed values as a CSV row. |
-| `findById(id)`, `findByTagName(tag)`, `findByClassName(className)`, `findByAttribute(name, value = "")` | Search the internal node tree; raw HTML/XML/etc. text is not parsed into searchable nodes. |
+| `findById(id)`, `findByTagName(tag)`, `findByClassName(className)`, `findByAttribute(name, value = "")` | Search the parsed node tree. |
 | `querySelector(selector)`, `querySelectorAll(selector)` | Run the simplified selector lookup described below. |
 | `findByNumericValue(attribute, min, max)` | Find nodes whose attribute parses as a number in the inclusive range. |
 | `findByDateRange(attribute, start, end)` | Find nodes whose parsed date/time attribute falls in the inclusive range. |
@@ -217,9 +277,9 @@ Public static methods are `number`, `currency`, `measurement`, `byteSize`, `date
 | `batchEdit(selector, callback)` | Call the callback for each node returned by `querySelectorAll`. |
 | `addElement(parent, tag, id = "", text = "")` | Create and append a `DocumentNode`; `parent` must be a non-null shared node. |
 | `deleteElementById(id)` | Remove a found node if it has a parent. |
-| `toString()` | Serialize according to the active format; CSV uses default CSV options. |
+| `toString()` | Serialize according to the active format; markup, JSON, YAML, and CSS are normalized, and CSV uses default options. |
 | `toCSVString(options = {})` | Serialize stored CSV data using the given delimiter, quoting, and line ending settings. |
-| `saveFile(filename)` | Write `toString()` to a file; returns false if the output file could not be opened. |
+| `saveFile(filename)` | Write `toString()` to a file; returns false if open/write fails and sets `lastError()`. |
 
 ### `DocumentNode`
 
@@ -232,11 +292,22 @@ Public operations:
 - Attributes: `setAttribute`, `getAttribute` (optional string), `getAttributeAs<T>`, `hasAttribute`, `removeAttribute`, `attributes`.
 - IDs and classes: `id`, `setId`, `hasId`, `getClasses`, `addClass`, `removeClass`.
 - Tree: `addChild(child)`, `addChild(index, child)`, `removeChild(child)`, `removeChild(index)`, `clearChildren`, `children`, `parent`.
-- Text: `getTextContent` recursively joins this node's text and descendant text; `setTextContent` replaces this node's text and removes child nodes of type `Text`.
+- Text: `getTextContent` recursively joins this node's text and descendant text; `setTextContent` replaces the node's text and clears all children.
 - Searches: `findById`, `findByTagName`, `findByClassName`, `findByAttribute`, `findByNumericValue`, `findByDateRange`.
 - Other: `querySelector`, `querySelectorAll`, `getElementByIndex`, `setInnerHTML`, `getInnerHTML`, `getOuterHTML`, `clone(deep = true)`.
 
-`getAttributeAs<T>` supports `int`, `double`, `bool`, and `system_clock::time_point`; unsupported types return `nullopt`. Boolean attributes recognize `true`/`false` and `1`/`0`. `findByAttribute(name)` with the default empty value matches attributes whose value is empty **or** any present value, so use an explicit value to request equality. Child insertion expects the node to be managed by `std::shared_ptr` because it sets a `weak_ptr` parent link.
+`getAttributeAs<T>` supports `int`, `double`, `bool`, and `system_clock::time_point`; unsupported types return `nullopt`. Boolean attributes recognize `true`/`false` and `1`/`0`. `findByAttribute(name)` with the default empty value matches attributes whose value is empty **or** any present value, so use an explicit value to request equality. Child insertion expects the node to be managed by `std::shared_ptr` because it sets a `weak_ptr` parent link. `setInnerHTML` replaces the children with a forgivingly parsed HTML fragment.
+
+### Parser coverage and limits
+
+- **HTML (`.html`, `.htm`):** tokenizes elements, attributes, text, comments, and doctype; accepts UTF-8 BOMs; decodes common and numeric character references; tolerates unclosed/mismatched tags and common optional closing tags. It is not the complete WHATWG HTML5 tree-construction algorithm, and the named-entity table and malformed-table recovery are limited.
+- **XHTML/XML/XSL (`.xhtml`, `.xml`, `.xsl`, `.xslt`):** accepts UTF-8 BOMs and requires well-formed XML, one document element, matching tag names, quoted attributes, and built-in/numeric entities. Comments, CDATA, processing instructions, and a DOCTYPE token are retained. External entity resolution is deliberately not performed; DTD-defined entities and namespace constraint validation are not implemented. XHTML is strict XML, unlike HTML.
+- **JSON (`.json`):** validates JSON syntax, numbers, escapes, nesting, and UTF-8; accepts a UTF-8 BOM and decodes Unicode surrogate pairs in `\\u` escapes. Comments and trailing commas are rejected.
+- **YAML (`.yaml`, `.yml`):** accepts UTF-8 BOMs and supports indentation-based mappings/sequences, plain and quoted scalars, comments, nested blocks, flow sequences/mappings, and simple `|`/`>` block scalars without blank or comment-only content lines. Anchors, aliases, tags, complex keys, multiple documents, and advanced block-scalar chomping/indent indicators are unsupported.
+- **CSS (`.css`):** accepts UTF-8 BOMs and parses comments, declarations, rule blocks, nested at-rules, strings, parentheses, and custom-property brace values. It performs structural parsing, not browser-level CSS semantic validation.
+- **CSV (`.csv`):** accepts a UTF-8 BOM and parses quoted delimiters, escaped quotes, CR/LF/CRLF records, and multiline quoted fields. It has no encoding conversion; `ParseOptions::encoding` is informational.
+
+All tree serializers normalize output; they preserve parsed text and comments where represented but not the original spacing or attribute order. Parser failures return `false`, report a message through `lastError()`, and do not replace the previous document.
 
 ### Selector behavior
 
@@ -254,6 +325,7 @@ The public enum contains these values, grouped by intended use:
 - JSON: `JSONDocument`, `JSONObject`, `JSONArray`, `JSONKey`, `JSONValue`
 - YAML: `YAMLDocument`, `YAMLMapping`, `YAMLSequence`, `YAMLScalar`, `YAMLKey`
 - CSV: `CSVDocument`, `CSVRow`, `CSVField`, `CSVHeader`
+- CSS: `CSSDocument`, `CSSRule`, `CSSDeclaration`
 - Date/time: `DateTime`, `Date`, `Time`, `Timestamp`, `Duration`
 - Numeric: `Integer`, `Floating`, `Scientific`
 - Common attributes: `ID`, `Class`, `Style`, `HRef`, `Src`, `Alt`, `Title`
@@ -266,4 +338,11 @@ The repository's formatting regression tests can be built and run with:
 ```sh
 g++ -std=c++20 -O2 -Wall -Wextra -pedantic tests/formatting_tests.cpp -o formatting_tests
 ./formatting_tests
+```
+
+The parser integration tests can be built and run with:
+
+```sh
+g++ -std=c++20 -O2 -Wall -Wextra -pedantic tests/document_parser_tests.cpp -o document_parser_tests
+./document_parser_tests
 ```
