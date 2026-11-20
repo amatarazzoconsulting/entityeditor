@@ -4,7 +4,7 @@ An Integrated Document Processing System
 
 ## Introduction and Overview
 
-The Integrated Document Processing System represents a paradigm shift in how developers interact with structured and semi-structured data formats. This C++17 library provides a unified, intuitive interface for parsing, querying, editing, and serializing multiple document formats including HTML, XML, XSL, JSON, YAML, and CSV. At its core, the system introduces a revolutionary approach to document manipulation through a consistent Entity-Node model that abstracts away the complexities of individual format specifications. What makes this system truly exceptional is its ability to automatically detect data types, including complex date/time patterns and numerical values, converting them into native C++ types without requiring explicit programmer intervention. The library has been meticulously designed with developer experience as the primary focus, offering fluent interfaces, intuitive naming conventions, and comprehensive query capabilities that make complex document transformations feel like natural C++ operations.
+The Integrated Document Processing System provides a unified interface for parsing, querying, editing, and serializing document data. This C++20 header-only library supports document formats including HTML, XML, JSON, YAML, and CSV, and provides an Entity-Node model for working with structured content. The typed-value system detects common numeric and date/time values and exposes them through C++ types.
 
 ## The Entity-Node Architecture
 
@@ -17,6 +17,29 @@ One of the most sophisticated features of the library is its automatic type dete
 ## Comprehensive Date and Time Handling
 
 The DateTimeParser class represents the culmination of extensive research into human date representation patterns. It processes dates in American format (MM/DD/YYYY), European format (DD/MM/YYYY), and international standard (YYYY-MM-DD), with month names recognized in both full and abbreviated forms. Time parsing handles 24-hour formats, 12-hour formats with AM/PM indicators, and durations expressed in milliseconds, seconds, minutes, and hours. The parser extracts timezone information from ISO timestamps and can convert between timezones when needed. All parsed dates and times are stored as std::chrono::system_clock::time_point instances, providing seamless integration with the C++ standard library's time utilities. This enables developers to perform temporal calculations, comparisons, and formatting using familiar chrono operations while the library handles the complexities of human-readable date expressions.
+
+## Formatting Values
+
+`ValueFormatter` provides deterministic, locale-independent display formatting for numeric values, currencies, SI measurements, byte sizes, dates, times, and durations. Include `document_parser.hpp` and call its static helpers:
+
+```cpp
+auto price = ValueFormatter::currency(1234.5, "USD");       // "$1,234.50"
+auto distance = ValueFormatter::measurement(1500, "m");     // "1.50 km"
+auto decimalSize = ValueFormatter::byteSize(1500);           // "1.5 kB"
+auto binarySize = ValueFormatter::byteSize(1536, 1, true);   // "1.5 KiB"
+auto timestamp = ValueFormatter::dateTime(
+    std::chrono::system_clock::time_point{});                // "1970-01-01 00:00:00 UTC"
+auto count = ValueFormatter::number(1234567.89, 2);          // "1,234,567.89"
+```
+
+`number(value, precision, grouping)` accepts precision from 0 to 15. `currency(value, code, precision)` recognizes USD, EUR, GBP, JPY, CNY, CAD, AUD, and INR; unrecognized codes are retained as an ISO-style code prefix. `measurement(value, unit, precision)` chooses SI prefixes from quecto through quetta in steps of 1000. `byteSize(bytes, precision, binary)` uses decimal SI units by default and IEC units (KiB, MiB, ...) when `binary` is true. `dateTime` formats in UTC (including its default `UTC` suffix); `date` accepts `std::chrono::sys_days`, and both accept `strftime` format strings. `duration` formats elapsed seconds as compact hour/minute/second components. Invalid precision throws `std::invalid_argument`.
+
+The focused formatting regression tests can be built and run with:
+
+```sh
+g++ -std=c++20 -O2 -Wall -Wextra -pedantic tests/formatting_tests.cpp -o formatting_tests
+./formatting_tests
+```
 
 ## CSV Processing Capabilities
 
@@ -168,7 +191,7 @@ The architecture is designed to accommodate future enhancements without breaking
 
 ## Community and Support
 
-The library is developed with community input, with contributions welcome for new parsers, query operators, and performance improvements. A comprehensive test suite ensures correctness across all supported platforms and compilers, with continuous integration running tests against major compilers and operating systems. The documentation is maintained in sync with the code, with examples extracted from real-world usage scenarios. Support channels include a GitHub issue tracker for bug reports, a discussion forum for questions and ideas, and regular releases that incorporate community contributions while maintaining API stability.
+The library is developed with community input, with contributions welcome for new parsers, query operators, and performance improvements. The repository includes focused formatting regression tests; compile and run them using the command above. Documentation and examples should be kept in sync with implemented behavior.
 
 ## Real-World Application Scenarios
 

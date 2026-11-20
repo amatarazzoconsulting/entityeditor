@@ -21,6 +21,11 @@
 #include <chrono>
 #include <iomanip>
 #include <charconv>
+#include <cmath>
+#include <ctime>
+#include <locale>
+#include <limits>
+#include <stdexcept>
 #include <type_traits>
 
 //=============================================================================
@@ -97,40 +102,7 @@ public:
         : m_type(ValueType::Duration), m_duration(value) {}
     
     // Type detection from string
-    static TypedValue detect(const std::string& str) {
-        // Try integer
-        try {
-            size_t pos;
-            long long intVal = std::stoll(str, &pos);
-            if (pos == str.length()) {
-                return TypedValue(intVal);
-            }
-        } catch (...) {}
-        
-        // Try double
-        try {
-            size_t pos;
-            double doubleVal = std::stod(str, &pos);
-            if (pos == str.length()) {
-                return TypedValue(doubleVal);
-            }
-        } catch (...) {}
-        
-        // Try date/time
-        auto dt = DateTimeParser::parse(str);
-        if (dt.valid) {
-            if (dt.isDateOnly) {
-                return TypedValue(dt.date);
-            } else if (dt.isTimeOnly) {
-                return TypedValue(dt.time);
-            } else {
-                return TypedValue(dt.value);
-            }
-        }
-        
-        // Default to string
-        return TypedValue(str);
-    }
+    static TypedValue detect(const std::string& str);
     
     // Type conversion methods
     bool asBool() const {
@@ -173,26 +145,7 @@ public:
         return 0.0;
     }
     
-    std::string asString() const {
-        if (m_type == ValueType::String) return m_string;
-        if (m_type == ValueType::Integer) return std::to_string(m_int);
-        if (m_type == ValueType::Double) {
-            std::ostringstream oss;
-            oss << std::fixed << m_double;
-            return oss.str();
-        }
-        if (m_type == ValueType::Boolean) return m_bool ? "true" : "false";
-        if (m_type == ValueType::DateTime) {
-            return DateTimeParser::format(m_timePoint, "%Y-%m-%d %H:%M:%S");
-        }
-        if (m_type == ValueType::Date) {
-            return DateTimeParser::format(m_date, "%Y-%m-%d");
-        }
-        if (m_type == ValueType::Time) {
-            return DateTimeParser::formatTime(m_timeOfDay);
-        }
-        return "";
-    }
+    std::string asString() const;
     
     std::chrono::system_clock::time_point asDateTime() const {
         if (m_type == ValueType::DateTime) return m_timePoint;
@@ -470,246 +423,269 @@ private:
 };
 
 //=============================================================================
-// CSVParser - Complete CSV support with type detection
+// ValueFormatter - Locale-independent display formatting
 //=============================================================================
-class CSVParser {
+class ValueFormatter {
 public:
-    struct ParseOptions {
-        char delimiter = ',';
-        char quote = '"';
-        char escape = '"';
-        bool hasHeader = true;
-        bool detectTypes = true;
-        bool trimFields = true;
-        bool skipEmptyLines = true;
-        std::string lineEnding = "\n";
-        std::string encoding = "UTF-8";
-    };
-    
-    struct CSVParseResult {
-        std::shared_ptr<DocumentNode> document;
-        std::vector<std::string> headers;
-        std::vector<std::vector<TypedValue>> data;
-        std::vector<std::vector<std::string>> rawData;
-        size_t rowCount = 0;
-        size_t columnCount = 0;
-        bool success = false;
-        std::string error;
-    };
-    
-    static CSVParseResult parse(const std::string& csv, const ParseOptions& options = {}) {
-        CSVParseResult result;
-        result.document = std::make_shared<DocumentNode>(EntityType::CSVDocument);
-        result.document->setName("csv");
-        
-        std::istringstream stream(csv);
-        std::string line;
-        bool firstRow = true;
-        size_t lineNum = 0;
-        
-        while (std::getline(stream, line)) {
-            lineNum++;
-            
-            // Handle different line endings
-            if (!line.empty() && line.back() == '\r') {
-                line.pop_back();
-            }
-            
-            // Skip empty lines
-            if (options.skipEmptyLines && line.empty()) {
-                continue;
-            }
-            
-            // Parse fields with quote handling
-            auto fields = parseCSVLine(line, options);
-            
-            if (firstRow && options.hasHeader) {
-                result.headers = fields;
-                firstRow = false;
-                continue;
-            }
-            
-            // Create row node
-            auto rowNode = std::make_shared<DocumentNode>(EntityType::CSVRow);
-            rowNode->setAttribute("row", std::to_string(result.rowCount));
-            
-            // Process fields
-            std::vector<TypedValue> typedRow;
-            std::vector<std::string> rawRow;
-            
-            for (size_t i = 0; i < fields.size(); ++i) {
-                std::string field = options.trimFields ? trim(fields[i]) : fields[i];
-                rawRow.push_back(field);
-                
-                TypedValue typedValue;
-                if (options.detectTypes) {
-                    typedValue = TypedValue::detect(field);
-                } else {
-                    typedValue = TypedValue(field);
-                }
-                typedRow.push_back(typedValue);
-                
-                // Create field node
-                auto fieldNode = std::make_shared<DocumentNode>(EntityType::CSVField);
-                if (!result.headers.empty() && i < result.headers.size()) {
-                    fieldNode->setName(result.headers[i]);
-                    fieldNode->setAttribute("column", result.headers[i]);
-                } else {
-                    fieldNode->setName("col_" + std::to_string(i));
-                }
-                fieldNode->setAttribute("column_index", std::to_string(i));
-                
-                // Store typed value as attribute
-                switch (typedValue.type()) {
-                    case TypedValue::ValueType::Integer:
-                        fieldNode->setAttribute("type", "integer");
-                        fieldNode->setAttribute("value_int", std::to_string(typedValue.asInt()));
-                        fieldNode->setText(std::to_string(typedValue.asInt()));
-                        break;
-                    case TypedValue::ValueType::Double:
-                        fieldNode->setAttribute("type", "float");
-                        fieldNode->setAttribute("value_double", std::to_string(typedValue.asDouble()));
-                        fieldNode->setText(std::to_string(typedValue.asDouble()));
-                        break;
-                    case TypedValue::ValueType::DateTime:
-                        fieldNode->setAttribute("type", "datetime");
-                        fieldNode->setAttribute("value_datetime", 
-                            DateTimeParser::format(typedValue.asDateTime(), "%Y-%m-%d %H:%M:%S"));
-                        fieldNode->setText(field);
-                        break;
-                    case TypedValue::ValueType::Date:
-                        fieldNode->setAttribute("type", "date");
-                        fieldNode->setText(field);
-                        break;
-                    case TypedValue::ValueType::Time:
-                        fieldNode->setAttribute("type", "time");
-                        fieldNode->setText(field);
-                        break;
-                    case TypedValue::ValueType::Boolean:
-                        fieldNode->setAttribute("type", "boolean");
-                        fieldNode->setAttribute("value_bool", typedValue.asBool() ? "true" : "false");
-                        fieldNode->setText(field);
-                        break;
-                    default:
-                        fieldNode->setAttribute("type", "string");
-                        fieldNode->setText(field);
-                        break;
-                }
-                
-                rowNode->addChild(fieldNode);
-            }
-            
-            result.data.push_back(typedRow);
-            result.rawData.push_back(rawRow);
-            result.document->addChild(rowNode);
-            result.rowCount++;
-            result.columnCount = std::max(result.columnCount, fields.size());
+    static std::string number(long double value, int precision = 2,
+                              bool grouping = true) {
+        validatePrecision(precision);
+        if (!std::isfinite(value)) {
+            if (std::isnan(value)) return "nan";
+            return std::signbit(value) ? "-inf" : "inf";
         }
-        
-        result.success = true;
+
+        std::ostringstream stream;
+        stream.imbue(std::locale::classic());
+        stream << std::fixed << std::setprecision(precision) << value;
+        std::string result = stream.str();
+        if (!grouping) return result;
+
+        const std::size_t decimal = result.find('.');
+        const std::size_t integerEnd = decimal == std::string::npos
+            ? result.size()
+            : decimal;
+        const std::size_t firstDigit = !result.empty() &&
+            (result[0] == '-' || result[0] == '+') ? 1 : 0;
+        for (std::size_t position = integerEnd; position > firstDigit + 3;
+             position -= 3) {
+            result.insert(position - 3, 1, ',');
+        }
         return result;
     }
-    
-    static std::string serialize(const CSVParseResult& result, const ParseOptions& options = {}) {
-        std::stringstream ss;
-        
-        // Write headers
-        if (!result.headers.empty()) {
-            for (size_t i = 0; i < result.headers.size(); ++i) {
-                if (i > 0) ss << options.delimiter;
-                ss << quoteIfNeeded(result.headers[i], options);
-            }
-            ss << options.lineEnding;
-        }
-        
-        // Write data
-        for (const auto& row : result.data) {
-            for (size_t i = 0; i < row.size(); ++i) {
-                if (i > 0) ss << options.delimiter;
-                std::string value = row[i].asString();
-                ss << quoteIfNeeded(value, options);
-            }
-            ss << options.lineEnding;
-        }
-        
-        return ss.str();
+
+    static std::string currency(long double value, const std::string& code = "USD",
+                                int precision = 2) {
+        validatePrecision(precision);
+        const std::string normalizedCode = uppercase(code);
+        const std::string symbol = currencySymbol(normalizedCode);
+        const std::string formatted = number(value, precision);
+        if (symbol.empty()) return normalizedCode + " " + formatted;
+        return formatted.front() == '-'
+            ? "-" + symbol + formatted.substr(1)
+            : symbol + formatted;
     }
-    
+
+    static std::string measurement(long double value, const std::string& unit,
+                                   int precision = 2) {
+        validatePrecision(precision);
+        if (unit.empty()) return number(value, precision);
+        if (!std::isfinite(value) || value == 0.0L) {
+            return number(value, precision) + " " + unit;
+        }
+
+        static constexpr const char* prefixes[] = {
+            "q", "r", "y", "z", "a", "f", "p", "n", "µ", "m",
+            "", "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q"
+        };
+        int exponent = std::clamp(
+            static_cast<int>(std::floor(std::log10(std::fabs(value)) / 3.0L)),
+            -10, 10);
+        long double scaled = value / std::pow(1000.0L, exponent);
+        const long double roundingMargin =
+            0.5L * std::pow(10.0L, -precision);
+        if (std::fabs(scaled) >= 1000.0L - roundingMargin && exponent < 10) {
+            ++exponent;
+            scaled = value / std::pow(1000.0L, exponent);
+        }
+        const std::string prefix = prefixes[exponent + 10];
+        const std::string suffix = prefix + unit;
+        return number(scaled, precision) +
+            (suffix.empty() ? "" : " " + suffix);
+    }
+
+    static std::string byteSize(long double bytes, int precision = 1,
+                                bool binary = false) {
+        validatePrecision(precision);
+        if (!std::isfinite(bytes)) {
+            return number(bytes, precision) + " B";
+        }
+        const long double base = binary ? 1024.0L : 1000.0L;
+        const char* const* units = binary
+            ? binaryByteUnits()
+            : decimalByteUnits();
+        const int maximumUnit = binary ? 8 : 10;
+
+        long double scaled = bytes;
+        int unitIndex = 0;
+        while (std::fabs(scaled) >= base && unitIndex < maximumUnit) {
+            scaled /= base;
+            ++unitIndex;
+        }
+        const long double roundingMargin =
+            0.5L * std::pow(10.0L, -precision);
+        if (unitIndex < maximumUnit &&
+            std::fabs(scaled) >= base - roundingMargin) {
+            scaled /= base;
+            ++unitIndex;
+        }
+        return number(scaled, precision) + " " + units[unitIndex];
+    }
+
+    static std::string dateTime(
+        const std::chrono::system_clock::time_point& value,
+        const std::string& format = "%Y-%m-%d %H:%M:%S UTC") {
+        const std::time_t timestamp =
+            std::chrono::system_clock::to_time_t(value);
+        std::tm utc = {};
+#if defined(_WIN32)
+        if (gmtime_s(&utc, &timestamp) != 0) {
+            throw std::runtime_error("Unable to convert timestamp to UTC");
+        }
+#else
+        if (gmtime_r(&timestamp, &utc) == nullptr) {
+            throw std::runtime_error("Unable to convert timestamp to UTC");
+        }
+#endif
+        return formatTime(&utc, format);
+    }
+
+    static std::string date(
+        const std::chrono::sys_days& value,
+        const std::string& format = "%Y-%m-%d") {
+        const std::chrono::year_month_day ymd(value);
+        std::tm dateValue = {};
+        dateValue.tm_year = static_cast<int>(ymd.year()) - 1900;
+        dateValue.tm_mon = static_cast<int>(static_cast<unsigned>(ymd.month())) - 1;
+        dateValue.tm_mday = static_cast<int>(static_cast<unsigned>(ymd.day()));
+        return formatTime(&dateValue, format);
+    }
+
+    static std::string duration(std::chrono::duration<double> value,
+                                int precision = 0) {
+        validatePrecision(precision);
+        if (!std::isfinite(value.count())) {
+            return number(value.count(), precision) + " s";
+        }
+
+        const bool negative = value.count() < 0;
+        long double remaining = std::fabs(value.count());
+        if (remaining / 3600.0L >=
+            static_cast<long double>(
+                std::numeric_limits<unsigned long long>::max())) {
+            return number(value.count(), precision) + " s";
+        }
+        const auto hours = static_cast<unsigned long long>(remaining / 3600.0L);
+        remaining -= static_cast<long double>(hours) * 3600.0L;
+        const auto minutes = static_cast<unsigned int>(remaining / 60.0L);
+        remaining -= static_cast<long double>(minutes) * 60.0L;
+
+        std::ostringstream result;
+        result.imbue(std::locale::classic());
+        if (negative) result << '-';
+        bool hasPreviousUnit = false;
+        if (hours != 0) {
+            result << hours << "h";
+            hasPreviousUnit = true;
+        }
+        if (minutes != 0) {
+            if (hasPreviousUnit) result << ' ';
+            result << minutes << "m";
+            hasPreviousUnit = true;
+        }
+        if (!hasPreviousUnit || remaining != 0.0L) {
+            if (hasPreviousUnit) result << ' ';
+            result << number(remaining, precision, false) << "s";
+        }
+        return result.str();
+    }
+
 private:
-    static std::vector<std::string> parseCSVLine(const std::string& line, const ParseOptions& options) {
-        std::vector<std::string> fields;
-        std::string field;
-        bool inQuotes = false;
-        bool escapeNext = false;
-        
-        for (size_t i = 0; i < line.length(); ++i) {
-            char c = line[i];
-            
-            if (escapeNext) {
-                field += c;
-                escapeNext = false;
-                continue;
-            }
-            
-            if (c == options.escape && inQuotes) {
-                // Check if this is an escaped quote
-                if (i + 1 < line.length() && line[i + 1] == options.quote) {
-                    field += options.quote;
-                    i++; // Skip next quote
-                    continue;
-                }
-                escapeNext = true;
-                continue;
-            }
-            
-            if (c == options.quote) {
-                inQuotes = !inQuotes;
-                continue;
-            }
-            
-            if (c == options.delimiter && !inQuotes) {
-                fields.push_back(field);
-                field.clear();
-                continue;
-            }
-            
-            field += c;
+    static void validatePrecision(int precision) {
+        if (precision < 0 || precision > 15) {
+            throw std::invalid_argument("Precision must be between 0 and 15");
         }
-        
-        fields.push_back(field);
-        return fields;
     }
-    
-    static std::string quoteIfNeeded(const std::string& field, const ParseOptions& options) {
-        // Check if quoting is needed
-        bool needsQuote = field.find(options.delimiter) != std::string::npos ||
-                          field.find(options.quote) != std::string::npos ||
-                          field.find('\n') != std::string::npos ||
-                          field.find('\r') != std::string::npos;
-        
-        if (!needsQuote) return field;
-        
-        std::string quoted;
-        quoted += options.quote;
-        for (char c : field) {
-            if (c == options.quote) {
-                quoted += options.escape;
-                quoted += options.quote;
-            } else {
-                quoted += c;
-            }
+
+    static std::string uppercase(std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+            [](unsigned char character) {
+                return static_cast<char>(std::toupper(character));
+            });
+        return value;
+    }
+
+    static std::string currencySymbol(const std::string& code) {
+        static const std::unordered_map<std::string, std::string> symbols = {
+            {"USD", "$"}, {"EUR", "€"}, {"GBP", "£"}, {"JPY", "¥"},
+            {"CNY", "¥"}, {"CAD", "CA$"}, {"AUD", "A$"}, {"INR", "₹"}
+        };
+        const auto found = symbols.find(code);
+        return found == symbols.end() ? "" : found->second;
+    }
+
+    static const char* const* decimalByteUnits() {
+        static const char* units[] = {
+            "B", "kB", "MB", "GB", "TB", "PB",
+            "EB", "ZB", "YB", "RB", "QB"
+        };
+        return units;
+    }
+
+    static const char* const* binaryByteUnits() {
+        static const char* units[] = {
+            "B", "KiB", "MiB", "GiB", "TiB",
+            "PiB", "EiB", "ZiB", "YiB"
+        };
+        return units;
+    }
+
+    static std::string formatTime(const std::tm* value,
+                                 const std::string& format) {
+        std::vector<char> buffer(128);
+        while (buffer.size() <= 65536) {
+            const std::size_t size =
+                std::strftime(buffer.data(), buffer.size(), format.c_str(), value);
+            if (size != 0) return std::string(buffer.data(), size);
+            if (format.empty()) return "";
+            buffer.resize(buffer.size() * 2);
         }
-        quoted += options.quote;
-        return quoted;
-    }
-    
-    static std::string trim(const std::string& str) {
-        size_t start = str.find_first_not_of(" \t");
-        if (start == std::string::npos) return "";
-        size_t end = str.find_last_not_of(" \t");
-        return str.substr(start, end - start + 1);
+        throw std::length_error("Formatted date/time exceeds 64 KiB");
     }
 };
+
+inline TypedValue TypedValue::detect(const std::string& str) {
+    try {
+        std::size_t position;
+        const long long value = std::stoll(str, &position);
+        if (position == str.length()) return TypedValue(value);
+    } catch (const std::exception&) {
+    }
+
+    try {
+        std::size_t position;
+        const double value = std::stod(str, &position);
+        if (position == str.length()) return TypedValue(value);
+    } catch (const std::exception&) {
+    }
+
+    const auto dateTime = DateTimeParser::parse(str);
+    if (dateTime.valid) {
+        if (dateTime.isDateOnly) return TypedValue(dateTime.date);
+        if (dateTime.isTimeOnly) return TypedValue(dateTime.time);
+        return TypedValue(dateTime.value);
+    }
+    return TypedValue(str);
+}
+
+inline std::string TypedValue::asString() const {
+    if (m_type == ValueType::String) return m_string;
+    if (m_type == ValueType::Integer) return std::to_string(m_int);
+    if (m_type == ValueType::Double) {
+        std::ostringstream stream;
+        stream.imbue(std::locale::classic());
+        stream << std::fixed << m_double;
+        return stream.str();
+    }
+    if (m_type == ValueType::Boolean) return m_bool ? "true" : "false";
+    if (m_type == ValueType::DateTime) {
+        return ValueFormatter::dateTime(m_timePoint, "%Y-%m-%d %H:%M:%S");
+    }
+    if (m_type == ValueType::Date) return ValueFormatter::date(m_date);
+    if (m_type == ValueType::Time) return DateTimeParser::formatTime(m_timeOfDay);
+    if (m_type == ValueType::Duration) return ValueFormatter::duration(m_duration);
+    return "";
+}
 
 //=============================================================================
 // Forward declarations for DocumentNode and DocumentEditor
@@ -1091,6 +1067,259 @@ private:
     ChildrenList m_children;
     std::weak_ptr<DocumentNode> m_parent;
 };
+
+//=============================================================================
+// CSVParser - Complete CSV support with type detection
+//=============================================================================
+class DocumentNode;
+
+class CSVParser {
+public:
+    struct ParseOptions {
+        char delimiter = ',';
+        char quote = '"';
+        char escape = '"';
+        bool hasHeader = true;
+        bool detectTypes = true;
+        bool trimFields = true;
+        bool skipEmptyLines = true;
+        std::string lineEnding = "\n";
+        std::string encoding = "UTF-8";
+    };
+
+    struct CSVParseResult {
+        std::shared_ptr<DocumentNode> document;
+        std::vector<std::string> headers;
+        std::vector<std::vector<TypedValue>> data;
+        std::vector<std::vector<std::string>> rawData;
+        size_t rowCount = 0;
+        size_t columnCount = 0;
+        bool success = false;
+        std::string error;
+    };
+
+    static CSVParseResult parse(const std::string& csv, const ParseOptions& options) {
+        CSVParseResult result;
+        result.document = std::make_shared<DocumentNode>(EntityType::CSVDocument);
+        result.document->setName("csv");
+
+        std::istringstream stream(csv);
+        std::string line;
+        bool firstRow = true;
+        size_t lineNum = 0;
+
+        while (std::getline(stream, line)) {
+            lineNum++;
+
+            // Handle different line endings
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+
+            // Skip empty lines
+            if (options.skipEmptyLines && line.empty()) {
+                continue;
+            }
+
+            // Parse fields with quote handling
+            auto fields = parseCSVLine(line, options);
+
+            if (firstRow && options.hasHeader) {
+                result.headers = fields;
+                firstRow = false;
+                continue;
+            }
+
+            // Create row node
+            auto rowNode = std::make_shared<DocumentNode>(EntityType::CSVRow);
+            rowNode->setAttribute("row", std::to_string(result.rowCount));
+
+            // Process fields
+            std::vector<TypedValue> typedRow;
+            std::vector<std::string> rawRow;
+
+            for (size_t i = 0; i < fields.size(); ++i) {
+                std::string field = options.trimFields ? trim(fields[i]) : fields[i];
+                rawRow.push_back(field);
+
+                TypedValue typedValue;
+                if (options.detectTypes) {
+                    typedValue = TypedValue::detect(field);
+                } else {
+                    typedValue = TypedValue(field);
+                }
+                typedRow.push_back(typedValue);
+
+                // Create field node
+                auto fieldNode = std::make_shared<DocumentNode>(EntityType::CSVField);
+                if (!result.headers.empty() && i < result.headers.size()) {
+                    fieldNode->setName(result.headers[i]);
+                    fieldNode->setAttribute("column", result.headers[i]);
+                } else {
+                    fieldNode->setName("col_" + std::to_string(i));
+                }
+                fieldNode->setAttribute("column_index", std::to_string(i));
+
+                // Store typed value as attribute
+                switch (typedValue.type()) {
+                    case TypedValue::ValueType::Integer:
+                        fieldNode->setAttribute("type", "integer");
+                        fieldNode->setAttribute("value_int", std::to_string(typedValue.asInt()));
+                        fieldNode->setText(std::to_string(typedValue.asInt()));
+                        break;
+                    case TypedValue::ValueType::Double:
+                        fieldNode->setAttribute("type", "float");
+                        fieldNode->setAttribute("value_double", std::to_string(typedValue.asDouble()));
+                        fieldNode->setText(std::to_string(typedValue.asDouble()));
+                        break;
+                    case TypedValue::ValueType::DateTime:
+                        fieldNode->setAttribute("type", "datetime");
+                        fieldNode->setAttribute("value_datetime",
+                            DateTimeParser::format(typedValue.asDateTime(), "%Y-%m-%d %H:%M:%S"));
+                        fieldNode->setText(field);
+                        break;
+                    case TypedValue::ValueType::Date:
+                        fieldNode->setAttribute("type", "date");
+                        fieldNode->setText(field);
+                        break;
+                    case TypedValue::ValueType::Time:
+                        fieldNode->setAttribute("type", "time");
+                        fieldNode->setText(field);
+                        break;
+                    case TypedValue::ValueType::Boolean:
+                        fieldNode->setAttribute("type", "boolean");
+                        fieldNode->setAttribute("value_bool", typedValue.asBool() ? "true" : "false");
+                        fieldNode->setText(field);
+                        break;
+                    default:
+                        fieldNode->setAttribute("type", "string");
+                        fieldNode->setText(field);
+                        break;
+                }
+
+                rowNode->addChild(fieldNode);
+            }
+
+            result.data.push_back(typedRow);
+            result.rawData.push_back(rawRow);
+            result.document->addChild(rowNode);
+            result.rowCount++;
+            result.columnCount = std::max(result.columnCount, fields.size());
+        }
+
+        result.success = true;
+        return result;
+    }
+
+    static CSVParseResult parse(const std::string& csv) {
+        return parse(csv, ParseOptions{});
+    }
+
+    static std::string serialize(const CSVParseResult& result, const ParseOptions& options) {
+        std::stringstream ss;
+
+        // Write headers
+        if (!result.headers.empty()) {
+            for (size_t i = 0; i < result.headers.size(); ++i) {
+                if (i > 0) ss << options.delimiter;
+                ss << quoteIfNeeded(result.headers[i], options);
+            }
+            ss << options.lineEnding;
+        }
+
+        // Write data
+        for (const auto& row : result.data) {
+            for (size_t i = 0; i < row.size(); ++i) {
+                if (i > 0) ss << options.delimiter;
+                std::string value = row[i].asString();
+                ss << quoteIfNeeded(value, options);
+            }
+            ss << options.lineEnding;
+        }
+
+        return ss.str();
+    }
+
+    static std::string serialize(const CSVParseResult& result) {
+        return serialize(result, ParseOptions{});
+    }
+
+private:
+    static std::vector<std::string> parseCSVLine(const std::string& line, const ParseOptions& options) {
+        std::vector<std::string> fields;
+        std::string field;
+        bool inQuotes = false;
+        bool escapeNext = false;
+
+        for (size_t i = 0; i < line.length(); ++i) {
+            char c = line[i];
+
+            if (escapeNext) {
+                field += c;
+                escapeNext = false;
+                continue;
+            }
+
+            if (c == options.escape && inQuotes) {
+                // Check if this is an escaped quote
+                if (i + 1 < line.length() && line[i + 1] == options.quote) {
+                    field += options.quote;
+                    i++; // Skip next quote
+                    continue;
+                }
+                escapeNext = true;
+                continue;
+            }
+
+            if (c == options.quote) {
+                inQuotes = !inQuotes;
+                continue;
+            }
+
+            if (c == options.delimiter && !inQuotes) {
+                fields.push_back(field);
+                field.clear();
+                continue;
+            }
+
+            field += c;
+        }
+
+        fields.push_back(field);
+        return fields;
+    }
+
+    static std::string quoteIfNeeded(const std::string& field, const ParseOptions& options) {
+        // Check if quoting is needed
+        bool needsQuote = field.find(options.delimiter) != std::string::npos ||
+                          field.find(options.quote) != std::string::npos ||
+                          field.find('\n') != std::string::npos ||
+                          field.find('\r') != std::string::npos;
+
+        if (!needsQuote) return field;
+
+        std::string quoted;
+        quoted += options.quote;
+        for (char c : field) {
+            if (c == options.quote) {
+                quoted += options.escape;
+                quoted += options.quote;
+            } else {
+                quoted += c;
+            }
+        }
+        quoted += options.quote;
+        return quoted;
+    }
+
+    static std::string trim(const std::string& str) {
+        size_t start = str.find_first_not_of(" \t");
+        if (start == std::string::npos) return "";
+        size_t end = str.find_last_not_of(" \t");
+        return str.substr(start, end - start + 1);
+    }
+};
+
 
 //=============================================================================
 // DocumentEditor - Main editing interface with CSV and type support
